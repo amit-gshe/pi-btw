@@ -1033,6 +1033,64 @@ function getCompletedExchangeCount(entries: BtwTranscript): number {
   ).length;
 }
 
+/**
+ * Markdown rendering is the single most expensive part of rebuilding the overlay,
+ * and the transcript is mostly finished entries that never change again while one
+ * entry streams a token at a time. Cache the parsed block per entry object so a
+ * token delta only re-parses the entry that actually changed instead of the whole
+ * thread. The WeakMap keys keep a completed thread collectable once it is reset.
+ */
+type BtwMarkdownBlock = {
+  type: "thinking" | "assistant-text";
+  text: string;
+  contentWidth: number;
+  theme: ExtensionContext["ui"]["theme"];
+  markdownTheme: MarkdownTheme;
+  lines: string[];
+};
+
+const btwMarkdownBlockCache = new WeakMap<object, BtwMarkdownBlock>();
+
+function renderBtwMarkdownBlock(
+  entry: Extract<BtwTranscriptEntry, { type: "thinking" | "assistant-text" }>,
+  theme: ExtensionContext["ui"]["theme"],
+  markdownTheme: MarkdownTheme,
+  contentWidth: number,
+): string[] {
+  const width = Math.max(1, contentWidth);
+  const cached = btwMarkdownBlockCache.get(entry);
+  if (
+    cached &&
+    cached.type === entry.type &&
+    cached.text === entry.text &&
+    cached.contentWidth === width &&
+    cached.theme === theme &&
+    cached.markdownTheme === markdownTheme
+  ) {
+    return cached.lines;
+  }
+
+  const markdown =
+    entry.type === "thinking"
+      ? new Markdown(entry.text, 0, 0, markdownTheme, {
+          color: (text: string) => theme.fg("thinkingText", text),
+          italic: true,
+        })
+      : new Markdown(entry.text, 0, 0, markdownTheme);
+  const lines = markdown.render(width).map((line) => line.replace(/\s+$/u, ""));
+
+  btwMarkdownBlockCache.set(entry, {
+    type: entry.type,
+    text: entry.text,
+    contentWidth: width,
+    theme,
+    markdownTheme,
+    lines,
+  });
+
+  return lines;
+}
+
 function buildOverlayTranscript(
   entries: BtwTranscript,
   theme: ExtensionContext["ui"]["theme"],
@@ -1040,15 +1098,17 @@ function buildOverlayTranscript(
   contentWidth: number,
 ): string[] {
   if (entries.length === 0) {
-    return [theme.fg("dim", "No BTW thread yet. Ask a side question to start one.")];
+    return [theme.fg("muted", "No BTW thread yet. Ask a side question to start one.")];
   }
 
   const lines: string[] = [];
-  const userBadge = buildTranscriptBadge(theme, "You", "userMessageBg", "accent");
-  const thinkingBadge = buildTranscriptBadge(theme, "Thinking", "toolPendingBg", "warning");
-  const toolBadge = buildTranscriptBadge(theme, "Tool", "toolPendingBg", "warning");
-  const assistantBadge = buildTranscriptBadge(theme, "Assistant", "customMessageBg", "success");
-  const separator = theme.fg("borderMuted", "────────────────────────────────────────");
+  // Badge foregrounds follow the token Pi documents for the background they sit on:
+  // userMessageBg -> userMessageText, customMessageBg -> customMessageLabel, tool panels -> toolTitle.
+  const userBadge = buildTranscriptBadge(theme, "You", "userMessageBg", "userMessageText");
+  const thinkingBadge = buildTranscriptBadge(theme, "Thinking", "toolPendingBg", "thinkingText");
+  const toolBadge = buildTranscriptBadge(theme, "Tool", "toolPendingBg", "toolTitle");
+  const assistantBadge = buildTranscriptBadge(theme, "Assistant", "customMessageBg", "customMessageLabel");
+  const separator = theme.fg("mdHr", "────────────────────────────────────────");
   const blockIndent = BTW_BLOCK_INDENT;
   const resultIndent = blockIndent;
 
@@ -1109,13 +1169,8 @@ function buildOverlayTranscript(
     }
 
     if (entry.type === "thinking") {
-      const thinkingHeader = entry.streaming ? `${thinkingBadge} ${theme.fg("warning", "▍")}` : thinkingBadge;
-      const markdownLines = new Markdown(entry.text, 0, 0, markdownTheme, {
-        color: (text: string) => theme.fg("warning", text),
-        italic: true,
-      })
-        .render(Math.max(1, contentWidth))
-        .map((line) => line.replace(/\s+$/u, ""));
+      const thinkingHeader = entry.streaming ? `${thinkingBadge} ${theme.fg("thinkingText", "▍")}` : thinkingBadge;
+      const markdownLines = renderBtwMarkdownBlock(entry, theme, markdownTheme, contentWidth);
       pushBlankLine();
       lines.push(thinkingHeader);
       for (const line of markdownLines) {
@@ -1125,8 +1180,8 @@ function buildOverlayTranscript(
     }
 
     if (entry.type === "tool-call") {
-      const toolLabel = theme.fg("warning", theme.bold(entry.toolName));
-      const argsLabel = entry.args ? theme.fg("dim", ` · ${entry.args}`) : "";
+      const toolLabel = theme.fg("toolTitle", theme.bold(entry.toolName));
+      const argsLabel = entry.args ? theme.fg("muted", ` · ${entry.args}`) : "";
       pushInlineBlock(toolBadge, `${toolLabel}${argsLabel}`);
       continue;
     }
@@ -1135,22 +1190,20 @@ function buildOverlayTranscript(
       const resultHeaderLabel = entry.isError
         ? theme.fg("error", "↳ error")
         : entry.streaming
-          ? theme.fg("warning", "↳ streaming result")
-          : theme.fg("dim", "↳ result");
-      const truncationLabel = entry.truncated ? theme.fg("dim", " (truncated)") : "";
+          ? theme.fg("muted", "↳ streaming result")
+          : theme.fg("muted", "↳ result");
+      const truncationLabel = entry.truncated ? theme.fg("muted", " (truncated)") : "";
       pushStackedBlock(`${resultHeaderLabel}${truncationLabel}`, entry.content, {
         blankBefore: false,
         indent: resultIndent,
-        style: (line) => (entry.isError ? theme.fg("error", line) : theme.fg("dim", line)),
+        style: (line) => (entry.isError ? theme.fg("error", line) : theme.fg("toolOutput", line)),
       });
       continue;
     }
 
     if (entry.type === "assistant-text") {
-      const assistantHeader = entry.streaming ? `${assistantBadge} ${theme.fg("warning", "▍")}` : assistantBadge;
-      const markdownLines = new Markdown(entry.text, 0, 0, markdownTheme)
-        .render(Math.max(1, contentWidth))
-        .map((line) => line.replace(/\s+$/u, ""));
+      const assistantHeader = entry.streaming ? `${assistantBadge} ${theme.fg("muted", "▍")}` : assistantBadge;
+      const markdownLines = renderBtwMarkdownBlock(entry, theme, markdownTheme, contentWidth);
       pushBlankLine();
       lines.push(assistantHeader);
       for (const line of markdownLines) {
@@ -1309,7 +1362,14 @@ function buildTranscriptBadge(
   theme: ExtensionContext["ui"]["theme"],
   label: string,
   background: "userMessageBg" | "toolPendingBg" | "customMessageBg",
-  foreground: "accent" | "warning" | "success",
+  foreground:
+    | "accent"
+    | "warning"
+    | "success"
+    | "userMessageText"
+    | "thinkingText"
+    | "toolTitle"
+    | "customMessageLabel",
 ): string {
   return theme.bg(background, theme.fg(foreground, theme.bold(` ${label} `)));
 }
@@ -1336,6 +1396,8 @@ export class BtwOverlayComponent extends Container implements Focusable {
   private readonly markdownTheme: MarkdownTheme;
   private readonly managesMouseReporting: boolean;
   private transcriptLines: string[] = [];
+  private readonly wrappedLineCache = new Map<string, string[]>();
+  private wrappedLineCacheWidth = -1;
   private transcriptScrollOffset = 0;
   private transcriptViewportHeight = 8;
   private contentWidth = 66;
@@ -1474,7 +1536,7 @@ export class BtwOverlayComponent extends Container implements Focusable {
     const start = Math.max(0, this.completionIndex - 4);
     return this.completionItems.slice(start, start + 5).map((command, index) => {
       const selected = start + index === this.completionIndex;
-      return this.theme.fg(selected ? "accent" : "dim",
+      return this.theme.fg(selected ? "accent" : "muted",
         `${selected ? "→" : " "} /${command.name}  ${command.description}`);
     });
   }
@@ -1512,14 +1574,45 @@ export class BtwOverlayComponent extends Container implements Focusable {
   }
 
   private wrapTranscript(innerWidth: number): string[] {
+    const width = Math.max(1, innerWidth);
+    const cache = this.wrappedLineCache;
+    if (this.wrappedLineCacheWidth !== width) {
+      cache.clear();
+      this.wrappedLineCacheWidth = width;
+    }
+
+    // Wrapping a line is pure ANSI-aware grapheme work, so the same line at the same
+    // width always yields the same result. Rebuilding the overlay happens on every
+    // streamed token and a thread can be thousands of lines long, so memoise by
+    // (width, line) and re-wrap only what actually changed.
     const wrapped: string[] = [];
+    const liveKeys = new Set<string>();
     for (const line of this.transcriptLines) {
       if (!line) {
         wrapped.push("");
         continue;
       }
-      wrapped.push(...wrapTextWithAnsi(line, Math.max(1, innerWidth)));
+
+      const key = `${width}\u0000${line}`;
+      liveKeys.add(key);
+      let lines = cache.get(key);
+      if (!lines) {
+        lines = wrapTextWithAnsi(line, width);
+        cache.set(key, lines);
+      }
+      wrapped.push(...lines);
     }
+
+    // Drop entries for lines the transcript no longer contains, so a long stream
+    // cannot accumulate one stale version per token.
+    if (cache.size > liveKeys.size) {
+      for (const key of cache.keys()) {
+        if (!liveKeys.has(key)) {
+          cache.delete(key);
+        }
+      }
+    }
+
     return wrapped;
   }
 
@@ -1657,7 +1750,7 @@ export class BtwOverlayComponent extends Container implements Focusable {
     const lines = [this.borderLine(innerWidth, "top")];
 
     lines.push(this.frameLine(this.theme.fg("accent", this.theme.bold(this.modeTextValue.trim())), innerWidth));
-    lines.push(this.frameLine(this.theme.fg("dim", summary), innerWidth));
+    lines.push(this.frameLine(this.theme.fg("muted", summary), innerWidth));
     lines.push(this.ruleLine(innerWidth));
 
     for (const line of visibleTranscript) {
@@ -1668,7 +1761,7 @@ export class BtwOverlayComponent extends Container implements Focusable {
     }
 
     lines.push(this.ruleLine(innerWidth));
-    lines.push(this.frameLine(this.theme.fg("warning", this.statusTextValue.trim()), innerWidth));
+    lines.push(this.frameLine(this.theme.fg("muted", this.statusTextValue.trim()), innerWidth));
     for (const row of completionRows) lines.push(this.frameLine(row, innerWidth));
     lines.push(this.inputFrameLine(dialogWidth));
     lines.push(this.frameLine(this.theme.fg("dim", this.hintsTextValue.trim()), innerWidth));
@@ -1713,9 +1806,19 @@ export class BtwOverlayComponent extends Container implements Focusable {
     this.summaryText.setText(this.summaryTextValue);
 
     this.rebuildTranscriptLines();
-    this.transcript.clear();
-    for (const line of this.transcriptLines) {
-      this.transcript.addChild(new Text(line, 1, 0));
+    // The overlay paints from `transcriptLines`; this container only mirrors them for
+    // callers that read the transcript surface. Reuse the existing rows instead of
+    // reallocating one Text per line on every streamed token.
+    const rows = this.transcript.children as unknown as Text[];
+    if (rows.length === this.transcriptLines.length) {
+      for (let i = 0; i < rows.length; i += 1) {
+        rows[i].setText(this.transcriptLines[i]);
+      }
+    } else {
+      this.transcript.clear();
+      for (const line of this.transcriptLines) {
+        this.transcript.addChild(new Text(line, 1, 0));
+      }
     }
 
     const status = this.getStatus() ?? "Ready. Enter submits; Escape dismisses without clearing.";
@@ -2960,7 +3063,7 @@ export default function (pi: ExtensionAPI) {
         : "[non-text btw message]";
 
     const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-    box.addChild(new Text(theme.fg("accent", theme.bold("[BTW]")), 0, 0));
+    box.addChild(new Text(theme.fg("customMessageLabel", theme.bold("[BTW]")), 0, 0));
     box.addChild(
       new Markdown(content, 0, 0, getMarkdownTheme(), {
         color: (text: string) => theme.fg("customMessageText", text),
@@ -2971,7 +3074,7 @@ export default function (pi: ExtensionAPI) {
       box.addChild(
         new Text(
           theme.fg(
-            "dim",
+            "muted",
             `model: ${details.provider}/${details.model} (${details.api ?? "openai-responses"}) · thinking: ${details.thinkingLevel}`,
           ),
           0,
@@ -2983,7 +3086,7 @@ export default function (pi: ExtensionAPI) {
         box.addChild(
           new Text(
             theme.fg(
-              "dim",
+              "muted",
               `tokens: in ${details.usage.input} · out ${details.usage.output} · total ${details.usage.totalTokens}`,
             ),
             0,

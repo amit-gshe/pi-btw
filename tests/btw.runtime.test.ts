@@ -2455,13 +2455,15 @@ describe("btw runtime behavior", () => {
 
     const transcript = transcriptText(overlay);
     expect(transcript).toContain("<bg:toolPendingBg>");
-    expect(transcript).toContain("<italic><fg:warning>Inspecting package.json</fg:warning></italic>");
+    // The stub theme emits literal `<fg:...>` markers, whose length counts toward wrapping; the
+    // real theme emits ANSI escapes that the renderer strips. Tolerate a wrap inside the phrase.
+    expect(transcript).toMatch(/<italic><fg:thinkingText>Inspecting\s+package\.json<\/fg:thinkingText><\/italic>/);
     expect(transcript).toContain("<bold>read</bold>");
     expect(transcript).toContain("package.json");
     expect(transcript).toContain("↳ result");
     expect(transcript).toContain("(truncated)");
     expect(transcript).toContain("line 1");
-    expect(transcript).toContain("    <fg:dim>line 1</fg:dim>");
+    expect(transcript).toContain("    <fg:toolOutput>line 1</fg:toolOutput>");
     expect(transcript).toContain("────────────────");
     expect(transcript).toContain("second question");
     expect(transcript).toContain("Second answer");
@@ -2567,9 +2569,9 @@ describe("btw runtime behavior", () => {
 
     const transcript = transcriptText(harness.latestOverlayComponent());
     expect(transcript).toContain("<bg:userMessageBg>");
-    expect(transcript).toContain("<fg:accent>");
+    expect(transcript).toContain("<fg:userMessageText>");
     expect(transcript).toContain("<bg:customMessageBg>");
-    expect(transcript).toContain("<fg:success>");
+    expect(transcript).toContain("<fg:customMessageLabel>");
   });
 
   it("renders overlay Markdown and wraps tables within the dialog width", async () => {
@@ -2971,8 +2973,8 @@ describe("btw runtime behavior", () => {
     expect(emptyLines[0]).not.toContain("<fg:accent>┌");
     expect(emptyLines.at(-1)).toContain("<fg:border>└");
     expect(emptyLines.at(-1)).not.toContain("<fg:accent>└");
-    expect(emptyStateLine).toContain("<fg:border>│</fg:border><fg:dim>No BTW thread yet.");
-    expect(emptyStateLine).not.toContain("<fg:border>│</fg:border> <fg:dim>No BTW thread yet.");
+    expect(emptyStateLine).toContain("<fg:border>│</fg:border><fg:muted>No BTW thread yet.");
+    expect(emptyStateLine).not.toContain("<fg:border>│</fg:border> <fg:muted>No BTW thread yet.");
     expect(assistantBodyLine).toContain("<fg:border>│</fg:border>    First answer");
     expect(inputLine).toContain("<fg:border>│</fg:border>> ");
     expect(inputLine).not.toContain("\x1b_pi:c\x07");
